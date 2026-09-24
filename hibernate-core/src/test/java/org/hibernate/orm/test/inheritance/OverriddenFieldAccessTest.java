@@ -45,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 				OverriddenFieldAccessTest.ParentEntityWithComplexProperty.class,
 				OverriddenFieldAccessTest.WithComplexPropertyOverride.class,
 				OverriddenFieldAccessTest.WithIdOverride.class,
+				OverriddenFieldAccessTest.EntityReferencingIdOverride.class,
 				OverriddenFieldAccessTest.ParentMappedSuperclass.class,
 				OverriddenFieldAccessTest.WithMappedSuperclassOverrides.class,
 				OverriddenFieldAccessTest.ParentEntityWithNonVirtualIdGetter.class,
@@ -152,6 +153,73 @@ public class OverriddenFieldAccessTest {
 
 			assertThat( entity ).isNotNull();
 			assertThat( entity.getId() ).isEqualTo( "child id" );
+		} );
+	}
+
+	@Test
+	void childIsAccessedForOverriddenIdUsedAsManyToOneForeignKey(SessionFactoryScope scope) {
+		scope.inTransaction( session -> {
+			final var referencedEntity = new WithIdOverride( "parent id", "child id" );
+			session.persist( referencedEntity );
+			session.persist( new EntityReferencingIdOverride( "referencing id", referencedEntity ) );
+		} );
+
+		scope.inTransaction( session -> {
+			final var referencingEntity = session.find( EntityReferencingIdOverride.class, "referencing id" );
+
+			assertThat( referencingEntity ).isNotNull();
+			assertThat( referencingEntity.getReferencedEntity() ).isNotNull();
+			assertThat( referencingEntity.getReferencedEntity().getId() ).isEqualTo( "child id" );
+		} );
+	}
+
+	@Test
+	void childIsAccessedForLoadedOverriddenIdUsedAsManyToOneForeignKey(SessionFactoryScope scope) {
+		scope.inTransaction( session -> session.persist( new WithIdOverride( "parent id", "child id" ) ) );
+
+		scope.inTransaction( session -> {
+			final var referencedEntity = session.find( WithIdOverride.class, "child id" );
+
+			assertThat( referencedEntity ).isNotNull();
+			assertThat( session.contains( referencedEntity ) ).isTrue();
+			assertThat( referencedEntity.getId() ).isEqualTo( "child id" );
+			assertThat( ( (ParentEntity) referencedEntity ).id ).isNull();
+			session.persist( new EntityReferencingIdOverride( "referencing id", referencedEntity ) );
+		} );
+
+		scope.inTransaction( session -> {
+			final var referencingEntity = session.find( EntityReferencingIdOverride.class, "referencing id" );
+
+			assertThat( referencingEntity ).isNotNull();
+			assertThat( referencingEntity.getReferencedEntity() ).isNotNull();
+			assertThat( referencingEntity.getReferencedEntity().getId() ).isEqualTo( "child id" );
+		} );
+	}
+
+	@Test
+	void childIsAccessedForDetachedOverriddenIdUsedAsManyToOneForeignKey(SessionFactoryScope scope) {
+		scope.inTransaction( session -> session.persist( new WithIdOverride( "parent id", "child id" ) ) );
+
+		final var referencedEntity = scope.fromTransaction(
+				session -> session.find( WithIdOverride.class, "child id" )
+		);
+
+		assertThat( referencedEntity ).isNotNull();
+		assertThat( referencedEntity.getId() ).isEqualTo( "child id" );
+		assertThat( ( (ParentEntity) referencedEntity ).id ).isNull();
+
+		scope.inTransaction( session -> {
+			assertThat( session.contains( referencedEntity ) ).isFalse();
+			session.persist( new EntityReferencingIdOverride( "referencing id", referencedEntity ) );
+			assertThat( session.contains( referencedEntity ) ).isFalse();
+		} );
+
+		scope.inTransaction( session -> {
+			final var referencingEntity = session.find( EntityReferencingIdOverride.class, "referencing id" );
+
+			assertThat( referencingEntity ).isNotNull();
+			assertThat( referencingEntity.getReferencedEntity() ).isNotNull();
+			assertThat( referencingEntity.getReferencedEntity().getId() ).isEqualTo( "child id" );
 		} );
 	}
 
@@ -648,6 +716,28 @@ public class OverriddenFieldAccessTest {
 		@Override
 		public String getId() {
 			return id;
+		}
+	}
+
+	@Entity(name = "EntityReferencingIdOverride")
+	public static class EntityReferencingIdOverride {
+		@Id
+		private String id;
+
+		@ManyToOne
+		@JoinColumn(name = "referenced_entity_id")
+		private ParentEntity referencedEntity;
+
+		protected EntityReferencingIdOverride() {
+		}
+
+		public EntityReferencingIdOverride(String id, ParentEntity referencedEntity) {
+			this.id = id;
+			this.referencedEntity = referencedEntity;
+		}
+
+		public ParentEntity getReferencedEntity() {
+			return referencedEntity;
 		}
 	}
 
