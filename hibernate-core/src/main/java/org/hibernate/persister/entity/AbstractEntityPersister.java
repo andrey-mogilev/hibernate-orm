@@ -519,6 +519,7 @@ public abstract class AbstractEntityPersister
 	protected AttributeMappingsMap declaredAttributeMappings = AttributeMappingsMap.builder().build();
 	protected AttributeMappingsMap declaredGenericAttributeMappings = AttributeMappingsMap.builder().build();
 	protected AttributeMappingsMap declaredOverrideAttributeMappings = AttributeMappingsMap.builder().build();
+	private boolean hasRejectedFieldOverrides;
 	@SuppressWarnings("NullAway.Init") // Initialized during mapping model creation.
 	protected AttributeMappingsList staticFetchableList;
 	// We build a cache for getters and setters to avoid megamorphic calls
@@ -5895,6 +5896,9 @@ public abstract class AbstractEntityPersister
 
 	private void buildDeclaredAttributeMappings
 			(@Nonnull MappingModelCreationProcess creationProcess, @Nonnull PersistentClass bootEntityDescriptor) {
+		hasRejectedFieldOverrides = superMappingType != null
+				&& superMappingType.getEntityPersister() instanceof AbstractEntityPersister superPersister
+				&& superPersister.hasRejectedFieldOverrides;
 		final var allPropertyClosure = bootEntityDescriptor.getAllPropertyClosure();
 		final var mappingsBuilder = AttributeMappingsMap.builder();
 		final var overrideMappingsBuilder = AttributeMappingsMap.builder();
@@ -5920,18 +5924,26 @@ public abstract class AbstractEntityPersister
 							)
 					);
 				}
-				else if ( hasPreferredOverrideField( superMapping, bootEntityDescriptor ) ) {
-					// this override mapping is created using a similar property as for supertype, so
-					// its actual differences are only propertyAccess, declaringType and navigableRole
-					overrideMappingsBuilder.put(
-							attributeName,
-							generateNonIdAttributeMapping(
-									bootProperty,
-									superMapping.getStateArrayPosition(),
-									superMapping.getFetchableKey(),
-									creationProcess
-							)
-					);
+				else {
+					final Field overrideField = findOverrideField( superMapping, bootEntityDescriptor );
+					if ( overrideField != null ) {
+						if ( preferOverrideField( overrideField, superMapping, bootEntityDescriptor ) ) {
+							// this override mapping is created using a similar property as for supertype, so
+							// its actual differences are only propertyAccess, declaringType and navigableRole
+							overrideMappingsBuilder.put(
+									attributeName,
+									generateNonIdAttributeMapping(
+											bootProperty,
+											superMapping.getStateArrayPosition(),
+											superMapping.getFetchableKey(),
+											creationProcess
+									)
+							);
+						}
+						else {
+							hasRejectedFieldOverrides = true;
+						}
+					}
 				}
 				// otherwise, it's defined on the supertype, skip it here
 			}
@@ -5974,6 +5986,46 @@ public abstract class AbstractEntityPersister
 		declaredGenericAttributeMappings = genericMappingsBuilder.build();
 	}
 
+	private boolean hasPreferredOverrideField(
+			AttributeMapping superMapping,
+			PersistentClass bootEntityDescriptor) {
+		final Field overrideField = findOverrideField( superMapping, bootEntityDescriptor );
+		return overrideField != null && preferOverrideField( overrideField, superMapping, bootEntityDescriptor );
+	}
+
+	/**
+	 * Finds a field with the same name as `superMapping` attribute in this entity class or in its non-entity mapped
+	 * superclasses, if that attribute uses field access. Whether persistence shall use the original "parent" field or
+	 * the overridden one for persistence depends on other conditions, see
+	 * {@link #preferOverrideField(Field, AttributeMapping, PersistentClass)}
+	 *
+	 * @param superMapping the attribute in one of entity superclasses.
+	 * @param bootEntityDescriptor the descriptor of the current entity class
+	 *
+	 * @return the override field, or {@code null} if none found
+	 */
+	private Field findOverrideField(AttributeMapping superMapping, PersistentClass bootEntityDescriptor) {
+		if ( !isFieldAccess( superMapping.getPropertyAccess() ) ) {
+			return null;
+		}
+		final String attributeName = superMapping.getAttributeName();
+		final Field overrideField = getDeclaredFieldOrNull( javaType.getJavaTypeClass(), attributeName );
+		if ( overrideField != null ) {
+			return overrideField;
+		}
+		// Entity superclasses have already processed their overrides, but mapped superclasses
+		// between this entity and its parent entity must be processed here.
+		for ( var mappedSuperclass = bootEntityDescriptor.getSuperMappedSuperclass();
+				mappedSuperclass != null;
+				mappedSuperclass = mappedSuperclass.getSuperMappedSuperclass() ) {
+			final Field field = getDeclaredFieldOrNull( mappedSuperclass.getMappedClass(), attributeName );
+			if ( field != null ) {
+				return field;
+			}
+		}
+		return null;
+	}
+
 	/**
 	 * In the case of duplicate distinct attributes with field access in an entity inheritance hierarchy,
 	 * the JPA specification states that the behavior is undefined, so we are free to persist either field.
@@ -5990,64 +6042,25 @@ public abstract class AbstractEntityPersister
 	 * </li>
 	 * </ul>
 	 *
+	 * @param overrideField the overriding field to consider
 	 * @param superMapping the attribute mapping from the parent entity
 	 * @param bootEntityDescriptor the boot model descriptor of the current entity
 	 *
-	 * @return whether an overriding field exists for this property and should be preferred for persistence
+	 * @return whether the overriding field should be preferred for persistence
 	 */
-	private boolean hasPreferredOverrideField(
+	private boolean preferOverrideField(
+			Field overrideField,
 			AttributeMapping superMapping,
 			PersistentClass bootEntityDescriptor) {
-		if ( !isFieldAccess( superMapping.getPropertyAccess() ) ) {
-			// not applicable for non-field access
-			return false;
-		}
 		final String attributeName = superMapping.getAttributeName();
 		final Method superGetter = getVirtualGetterOrNull(
 				superMapping.getDeclaringType().getJavaType(),
 				attributeName
 		);
-		if ( superGetter == null ) {
-			return false;
-		}
 		final var expectedAttributeTypeOrNull =
 				bootEntityDescriptor.getProperty( attributeName ).isGeneric() ? null : superMapping.getJavaType();
-
-		if ( hasPreferredOverrideFieldIn(
-				javaType.getJavaTypeClass(),
-				attributeName,
-				expectedAttributeTypeOrNull,
-				superGetter
-		) ) {
-			return true;
-		}
-		// besides the current entity class, we should also check the hierarchy of mapped superclasses - if fields
-		// overrides are in them, they should be processed by this entity persister. Note that there is no need to
-		// traverse entity superclasses - the persister for them already processed the overrides.
-		for ( var mappedSuperclass = bootEntityDescriptor.getSuperMappedSuperclass();
-				mappedSuperclass != null;
-				mappedSuperclass = mappedSuperclass.getSuperMappedSuperclass() ) {
-			if ( hasPreferredOverrideFieldIn(
-					mappedSuperclass.getMappedClass(),
-					attributeName,
-					expectedAttributeTypeOrNull,
-					superGetter
-			) ) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private boolean hasPreferredOverrideFieldIn(
-			Class<?> declaringClass,
-			String attributeName,
-			JavaType<?> expectedAttributeTypeOrNull,
-			Method superGetter) {
-		final Field overrideField = getDeclaredFieldOrNull( declaringClass, attributeName );
-		// case of "overridden" properties - prefer to access the "child" field, as in Hibernate 5.x
-		return overrideField != null
-				&& hasDeclaredOverrideGetter( declaringClass, superGetter )
+		return superGetter != null
+				&& hasDeclaredOverrideGetter( overrideField.getDeclaringClass(), superGetter )
 				&& ( expectedAttributeTypeOrNull == null
 						|| isSameAttributeType(
 								actualInheritedMemberType( javaType.getJavaTypeClass(), overrideField ),
@@ -7112,6 +7125,12 @@ public abstract class AbstractEntityPersister
 		for ( int i = 0; i < size; i++ ) {
 			final var propertyAccess = attributeMappings.get( i ).getAttributeMetadata().getPropertyAccess();
 			accessorCache[i] = propertyAccess.getPropertyValueAccessor();
+		}
+		if ( hasRejectedFieldOverrides ) {
+			// Bulk access resolves fields against the concrete class, so it would use the rejected
+			// override instead of the field selected by the final attribute mapping.
+			multiValueReader = null;
+			multiValueWriter = null;
 		}
 		// subclasses?  it depends on the usage
 	}
