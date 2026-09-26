@@ -246,7 +246,6 @@ import org.hibernate.type.spi.TypeConfiguration;
 
 import java.io.Serializable;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -288,7 +287,6 @@ import static org.hibernate.generator.EventType.UPDATE;
 import static org.hibernate.generator.values.internal.GeneratedValuesHelper.getGeneratedValuesDelegate;
 import static org.hibernate.internal.CoreMessageLogger.CORE_LOGGER;
 import static org.hibernate.internal.util.GenericsHelper.actualInheritedMemberType;
-import static org.hibernate.internal.util.ReflectHelper.getterMethodOrNull;
 import static org.hibernate.internal.util.ReflectHelper.isAbstractClass;
 import static org.hibernate.internal.util.StringHelper.isEmpty;
 import static org.hibernate.internal.util.StringHelper.qualify;
@@ -6031,16 +6029,8 @@ public abstract class AbstractEntityPersister
 	 * the JPA specification states that the behavior is undefined, so we are free to persist either field.
 	 * In both cases, the metadata from the parent property shall be used, as it corresponds to a database column that
 	 * may be shared across different entity types.
-	 * However, there are cases when either a parent or child field is preferable:
-	 * <ul>
-	 * <li>
-	 * if types are different, the parent attribute is preferred, as it matches the database type;
-	 * </li>
-	 * <li>
-	 * if the parent field has a virtual getter overridden by the child entity, access through the getter returns the
-	 * child field, so Hibernate shall get/set the child attribute as well.
-	 * </li>
-	 * </ul>
+	 * Prefer the child field when its type matches the inherited attribute type. If the types differ,
+	 * retain the parent field, as it matches the database type.
 	 *
 	 * @param overrideField the overriding field to consider
 	 * @param superMapping the attribute mapping from the parent entity
@@ -6052,19 +6042,13 @@ public abstract class AbstractEntityPersister
 			Field overrideField,
 			AttributeMapping superMapping,
 			PersistentClass bootEntityDescriptor) {
-		final String attributeName = superMapping.getAttributeName();
-		final Method superGetter = getVirtualGetterOrNull(
-				superMapping.getDeclaringType().getJavaType(),
-				attributeName
-		);
 		final var expectedAttributeTypeOrNull =
-				bootEntityDescriptor.getProperty( attributeName ).isGeneric() ? null : superMapping.getJavaType();
-		return superGetter != null
-				&& hasDeclaredOverrideGetter( overrideField.getDeclaringClass(), superGetter )
-				&& ( expectedAttributeTypeOrNull == null
-						|| isSameAttributeType(
-								actualInheritedMemberType( javaType.getJavaTypeClass(), overrideField ),
-								expectedAttributeTypeOrNull.getJavaType() ) );
+				bootEntityDescriptor.getProperty( superMapping.getAttributeName() ).isGeneric()
+						? null : superMapping.getJavaType();
+		return expectedAttributeTypeOrNull == null
+				|| isSameAttributeType(
+						actualInheritedMemberType( javaType.getJavaTypeClass(), overrideField ),
+						expectedAttributeTypeOrNull.getJavaType() );
 	}
 
 	/**
@@ -6082,42 +6066,6 @@ public abstract class AbstractEntityPersister
 				&& expectedAttributeType instanceof Class<?> expectedAttributeClass
 				? canonicalize( overrideFieldClass ).equals( canonicalize( expectedAttributeClass ) )
 				: overrideFieldType.equals( expectedAttributeType );
-	}
-
-	private boolean hasDeclaredOverrideGetter(Class<?> declaringClass, Method superGetter) {
-		try {
-			final Method getter = declaringClass.getDeclaredMethod( superGetter.getName() );
-			final int modifiers = getter.getModifiers();
-			return superGetter.getDeclaringClass().isAssignableFrom( declaringClass )
-					&& isVisibleForOverride( superGetter, declaringClass )
-					&& !Modifier.isStatic( modifiers )
-					&& !Modifier.isPrivate( modifiers )
-					&& superGetter.getReturnType().isAssignableFrom( getter.getReturnType() );
-		}
-		catch (NoSuchMethodException e) {
-			return false;
-		}
-	}
-
-	private boolean isVisibleForOverride(Method superGetter, Class<?> declaringClass) {
-		final int modifiers = superGetter.getModifiers();
-		return Modifier.isPublic( modifiers )
-				|| Modifier.isProtected( modifiers )
-				// note: compare package names, as Package instances are per-classloader
-				|| superGetter.getDeclaringClass().getPackageName().equals( declaringClass.getPackageName() );
-	}
-
-	private Method getVirtualGetterOrNull(JavaType<?> declaringJavaType, String attributeName) {
-		final Method getter = getterMethodOrNull( declaringJavaType.getJavaTypeClass(), attributeName );
-		if ( getter != null ) {
-			final int modifiers = getter.getModifiers();
-			if ( !Modifier.isStatic( modifiers )
-					&& !Modifier.isPrivate( modifiers )
-					&& !Modifier.isFinal( modifiers ) ) {
-				return getter;
-			}
-		}
-		return null;
 	}
 
 	private Field getDeclaredFieldOrNull(Class<?> declaringClass, String attributeName) {

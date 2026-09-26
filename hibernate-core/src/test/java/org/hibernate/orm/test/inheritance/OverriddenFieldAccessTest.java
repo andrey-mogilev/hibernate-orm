@@ -39,7 +39,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 				OverriddenFieldAccessTest.WithOverridesInMiddleOnly.class,
 				OverriddenFieldAccessTest.ThreeLevelOverrideMappedSuperclass.class,
 				OverriddenFieldAccessTest.WithMappedSuperclassOverridesInMiddleOnly.class,
-				OverriddenFieldAccessTest.WithFieldOverride.class,
 				OverriddenFieldAccessTest.WithPropertyOverride.class,
 				OverriddenFieldAccessTest.AssociatedEntity.class,
 				OverriddenFieldAccessTest.ParentEntityWithComplexProperty.class,
@@ -48,8 +47,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 				OverriddenFieldAccessTest.EntityReferencingIdOverride.class,
 				OverriddenFieldAccessTest.ParentMappedSuperclass.class,
 				OverriddenFieldAccessTest.WithMappedSuperclassOverrides.class,
-				OverriddenFieldAccessTest.ParentEntityWithNonVirtualIdGetter.class,
-				OverriddenFieldAccessTest.WithIdOverrideAndNonVirtualParentGetter.class,
 				OverriddenFieldAccessTest.ParentEntityWithCompositeNaturalId.class,
 				OverriddenFieldAccessTest.WithCompositeNaturalIdOverride.class,
 				OverriddenFieldAccessTest.ParentEntityWithSimpleNaturalId.class,
@@ -73,33 +70,20 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void parentIsAccessedForOverriddenFieldWithoutGetter(SessionFactoryScope scope) {
-		scope.inTransaction( session -> {
-			final var entity = new WithFieldOverride(
-					"id",
-					"parent value",
-					"child value"
-			);
-			session.persist( entity );
-		} );
-
-		scope.inTransaction( session -> {
-			final var entity = session.find( WithFieldOverride.class, "id" );
-
-			assertThat( entity ).isNotNull();
-			assertThat( ( (ParentEntity) entity ).field ).isEqualTo( "parent value" );
-			assertThat( entity.field ).isNull();
-		} );
-	}
-
-	@Test
-	void childIsAccessedForOverriddenFieldWithGetter(SessionFactoryScope scope) {
+	void childIsAccessedForOverriddenField(SessionFactoryScope scope) {
 		scope.inTransaction( session -> {
 			final var entity = new WithPropertyOverride(
 					"id",
 					"parent property value",
 					"child property value"
 			);
+
+			final var persister = scope.getSessionFactory().getMappingMetamodel()
+					.getEntityDescriptor( WithPropertyOverride.class );
+			assertThat( persister.findAttributeMapping( "property" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( "child property value" );
+
 			session.persist( entity );
 		} );
 
@@ -117,19 +101,24 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void childIsAccessedForOverriddenComplexPropertyWithGetter(SessionFactoryScope scope) {
+	void childIsAccessedForOverriddenComplexProperty(SessionFactoryScope scope) {
 		scope.inTransaction( session -> {
 			final var parentComplexProperty = new AssociatedEntity( "parent complex property" );
 			final var childComplexProperty = new AssociatedEntity( "child complex property" );
 			session.persist( parentComplexProperty );
 			session.persist( childComplexProperty );
-			session.persist(
-					new WithComplexPropertyOverride(
-							"id",
-							parentComplexProperty,
-							childComplexProperty
-					)
+			final var entity = new WithComplexPropertyOverride(
+					"id",
+					parentComplexProperty,
+					childComplexProperty
 			);
+			final var persister = scope.getSessionFactory().getMappingMetamodel()
+					.getEntityDescriptor( WithComplexPropertyOverride.class );
+			assertThat( persister.findAttributeMapping( "complexProperty" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isSameAs( childComplexProperty );
+
+			session.persist( entity );
 		} );
 
 		scope.inTransaction( session -> {
@@ -142,7 +131,7 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void childIsAccessedForOverriddenIdFieldWithGetter(SessionFactoryScope scope) {
+	void childIsAccessedForOverriddenIdField(SessionFactoryScope scope) {
 		scope.inTransaction( session -> {
 			final var entity = new WithIdOverride( "parent id", "child id" );
 			session.persist( entity );
@@ -287,6 +276,16 @@ public class OverriddenFieldAccessTest {
 					"parent property value",
 					"child property value"
 			);
+
+			final var persister = scope.getSessionFactory().getMappingMetamodel()
+					.getEntityDescriptor( WithMappedSuperclassOverrides.class );
+			assertThat( persister.findAttributeMapping( "field" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( "child field value" );
+			assertThat( persister.findAttributeMapping( "property" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( "child property value" );
+
 			session.persist( entity );
 		} );
 
@@ -300,25 +299,6 @@ public class OverriddenFieldAccessTest {
 			assertThat( ( (ParentMappedSuperclass) entity ).id ).isNull();
 			assertThat( ( (ParentMappedSuperclass) entity ).field ).isNull();
 			assertThat( ( (ParentMappedSuperclass) entity ).property ).isNull();
-		} );
-	}
-
-	@Test
-	void parentIsAccessedForOverriddenIdFieldWithNonVirtualParentGetter(SessionFactoryScope scope) {
-		scope.inTransaction( session -> {
-			final var entity = new WithIdOverrideAndNonVirtualParentGetter( "parent id", "child id" );
-			session.persist( entity );
-		} );
-
-		scope.inTransaction( session -> {
-			final var entity = session.find(
-					WithIdOverrideAndNonVirtualParentGetter.class,
-					"parent id"
-			);
-
-			assertThat( entity ).isNotNull();
-			assertThat( ( (ParentEntityWithNonVirtualIdGetter) entity ).getId() ).isEqualTo( "parent id" );
-			assertThat( entity.getId() ).isNull();
 		} );
 	}
 
@@ -347,15 +327,25 @@ public class OverriddenFieldAccessTest {
 
 	@Test
 	void childIsAccessedForOverridesWithDifferentAccessStrategies(SessionFactoryScope scope) {
-		scope.inTransaction( session -> session.persist(
-				new WithReversedAccessOverrides(
-						"id",
-						"parent field-access property",
-						"child property-access property",
-						"parent property-access property",
-						"child field-access property"
-				)
-		) );
+		scope.inTransaction( session -> {
+			final var entity = new WithReversedAccessOverrides(
+					"id",
+					"parent field-access property",
+					"child property-access property",
+					"parent property-access property",
+					"child field-access property"
+			);
+			final var persister = scope.getSessionFactory().getMappingMetamodel()
+					.getEntityDescriptor( WithReversedAccessOverrides.class );
+			assertThat( persister.findAttributeMapping( "fieldAccessProperty" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( "child property-access property" );
+			assertThat( persister.findAttributeMapping( "propertyAccessProperty" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( "child field-access property" );
+
+			session.persist( entity );
+		} );
 
 		scope.inTransaction( session -> {
 			final var entity = session.find( WithReversedAccessOverrides.class, "id" );
@@ -376,7 +366,7 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void childIsAccessedForOverriddenCompositeNaturalIdFieldWithGetter(SessionFactoryScope scope) {
+	void childIsAccessedForOverriddenCompositeNaturalIdField(SessionFactoryScope scope) {
 		scope.inTransaction( session -> {
 			final var entity = new WithCompositeNaturalIdOverride(
 					"part 1",
@@ -407,7 +397,7 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void childIsAccessedForOverriddenSimpleNaturalIdFieldWithGetter(SessionFactoryScope scope) {
+	void childIsAccessedForOverriddenSimpleNaturalIdField(SessionFactoryScope scope) {
 		scope.inTransaction( session -> {
 			final var entity = new WithSimpleNaturalIdOverride( "parent natural id", "child natural id" );
 
@@ -434,10 +424,20 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void childIsAccessedForOverriddenPrimitiveFieldsWithGetters(SessionFactoryScope scope) {
-		scope.inTransaction( session -> session.persist(
-				new WithPrimitiveOverride( "id", 1, 2L, 3, 4L )
-		) );
+	void childIsAccessedForOverriddenPrimitiveFields(SessionFactoryScope scope) {
+		scope.inTransaction( session -> {
+			final var entity = new WithPrimitiveOverride( "id", 1, 2L, 3, 4L );
+			final var persister = scope.getSessionFactory().getMappingMetamodel()
+					.getEntityDescriptor( WithPrimitiveOverride.class );
+			assertThat( persister.findAttributeMapping( "intProperty" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( 3 );
+			assertThat( persister.findAttributeMapping( "longProperty" )
+					.getPropertyAccess().getPropertyValueAccessor().get( entity ) )
+					.isEqualTo( 4L );
+
+			session.persist( entity );
+		} );
 
 		scope.inTransaction( session -> {
 			final var entity = session.find( WithPrimitiveOverride.class, "id" );
@@ -451,7 +451,7 @@ public class OverriddenFieldAccessTest {
 	}
 
 	@Test
-	void childIsAccessedForOverriddenVersionFieldWithGetter(SessionFactoryScope scope) {
+	void childIsAccessedForOverriddenVersionField(SessionFactoryScope scope) {
 		final var entityDescriptor = scope.getSessionFactory().getMappingMetamodel()
 				.getEntityDescriptor( WithVersionOverride.class );
 
@@ -604,25 +604,13 @@ public class OverriddenFieldAccessTest {
 		}
 	}
 
-	@Entity(name = "WithFieldOverride")
-	public static class WithFieldOverride extends ParentEntity {
-		private String field;
-
-		protected WithFieldOverride() {
-		}
-
-		public WithFieldOverride(String id, String parentField, String childField) {
-			super( id, parentField, "property value" );
-			this.field = childField;
-		}
-	}
-
 	@Entity(name = "WithPropertyOverride")
 	public static class WithPropertyOverride extends ParentEntity {
 		@Column(name = "annotation_should_be_ignored")
-		private String property;
+		final private String property;
 
 		protected WithPropertyOverride() {
+			property = null;
 		}
 
 		public WithPropertyOverride(String id, String parentProperty, String childProperty) {
@@ -796,41 +784,6 @@ public class OverriddenFieldAccessTest {
 		@Override
 		public String getProperty() {
 			return property;
-		}
-	}
-
-	@Entity(name = "ParentEntityWithNonVirtualIdGetter")
-	@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
-	public abstract static class ParentEntityWithNonVirtualIdGetter {
-		@Id
-		private String id;
-
-		protected ParentEntityWithNonVirtualIdGetter() {
-		}
-
-		protected ParentEntityWithNonVirtualIdGetter(String id) {
-			this.id = id;
-		}
-
-		private String getId() {
-			return id;
-		}
-	}
-
-	@Entity(name = "WithNonVirtualIdGetter")
-	public static class WithIdOverrideAndNonVirtualParentGetter extends ParentEntityWithNonVirtualIdGetter {
-		private String id;
-
-		protected WithIdOverrideAndNonVirtualParentGetter() {
-		}
-
-		public WithIdOverrideAndNonVirtualParentGetter(String parentId, String childId) {
-			super( parentId );
-			this.id = childId;
-		}
-
-		public String getId() {
-			return id;
 		}
 	}
 
